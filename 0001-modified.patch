@@ -1,0 +1,718 @@
+From 1cb97845816d7b34d42236db47dbcb060676492b Mon Sep 17 00:00:00 2001
+From: pingbowen <pingbowen23@163.com>
+Date: Tue, 27 Feb 2024 11:10:06 +0800
+Subject: [PATCH] modified
+
+---
+ bitdelta/diff.py              |  72 +++++++++++--
+ bitdelta/train.py             |  48 ++++-----
+ bitdelta/train2.py            |  37 +++++++
+ bitdelta/utils.py             |   3 +
+ eval.py                       |  30 ++++++
+ lowbit_lowrank.py             |  23 +++++
+ run.sh                        |  17 ++++
+ scripts/ppl_eval_example.bash |   6 +-
+ tailor.py                     | 186 ++++++++++++++++++++++++++++++++++
+ test.py                       |  95 +++++++++++++++++
+ 10 files changed, 481 insertions(+), 36 deletions(-)
+ create mode 100644 bitdelta/train2.py
+ create mode 100644 eval.py
+ create mode 100644 lowbit_lowrank.py
+ create mode 100644 run.sh
+ create mode 100755 tailor.py
+ create mode 100644 test.py
+
+diff --git a/bitdelta/diff.py b/bitdelta/diff.py
+index 660ec86..626df11 100644
+--- a/bitdelta/diff.py
++++ b/bitdelta/diff.py
+@@ -9,12 +9,13 @@ class BinaryDiff(nn.Module):
+     def __init__(self, base, finetune):
+         super().__init__()
+         diff = finetune - base
++        # diff = decomposition(diff, 2048)
+         quantile = diff.float().abs().mean()
+ 
+         mask = torch.ones_like(diff)
+         mask[diff < 0] = 0
+         mask = pack(mask.bool().T)
+-
++     
+         self.register_buffer("mask", mask)
+         self.register_buffer("base", base.T)
+         self.register_parameter(
+@@ -38,7 +39,15 @@ class BinaryDiff(nn.Module):
+         repeated_mask = self.mask.unsqueeze(0).repeat(x.size(0), 1, 1)
+         return x @ self.base + self.coeff * binary_bmm(x, repeated_mask)
+ 
+-def compress_diff(base_model, finetuned_model, finetuned_compressed_model):
++def Pass(layers=None,name=None):
++    if layers is not None:
++        for layer in layers:
++            if layer in name:
++                return True
++    return False
++
++
++def compress_diff(base_model, finetuned_model, finetuned_compressed_model,layers=None):
+     def compress_submodule(name, subname, module, submodule):
+         target_device = submodule.weight.device
+                     
+@@ -59,11 +68,15 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model):
+     # TODO: this can be parallelized
+     for name, module in finetuned_compressed_model.named_modules():
+         if "mlp" in name or "self_attn" in name:
++            
++            if Pass(layers,name) == True:
++                continue
++            
+             for subname, submodule in module.named_children():
+                 if "proj" in subname:
+                     compress_submodule(name, subname, module, submodule)
+ 
+-def save_diff(finetuned_compressed_model, save_dir):
++def save_diff(finetuned_compressed_model, save_dir,layers=None):
+     diff_dict = {}
+ 
+     for name, module in finetuned_compressed_model.named_modules():
+@@ -73,24 +86,31 @@ def save_diff(finetuned_compressed_model, save_dir):
+             diff_dict[name + ".coeff"] = module.coeff.cpu()
+ 
+     for name, param in finetuned_compressed_model.named_parameters():
++        if "mlp" in name or "self_attn" in name:
++            if Pass(layers,name) == True:
++                continue
++        
+         if param.requires_grad:
+             diff_dict[name] = param.cpu()
+-
++            
++    # import pdb; pdb.set_trace()
+     torch.save(diff_dict, save_dir)
+ 
+ @torch.no_grad()
+ def load_diff(model, diff_dir):
+     device = model.device
+     diff_dict = torch.load(diff_dir)
+-
++        
+     for name, module in model.named_modules():
+         if name + ".mask" in diff_dict:
+             coeff = diff_dict[name + ".coeff"].to(device)
+             mask = diff_dict[name + ".mask"].to(device)
+ 
+-            setattr(module, "mask", mask)
+-            setattr(module, "coeff", coeff)
+-            # module.weight.add_((mask * coeff).to(module.weight.dtype))
++            # setattr(module, "mask", mask)
++            # setattr(module, "coeff", coeff)
++            weight = (unpack(mask)*2-1) * coeff
++
++            module.weight.add_(weight.T.to(module.weight.dtype))
+         elif name + ".weight" in diff_dict:
+             module.weight = nn.Parameter(diff_dict[name + ".weight"].to(device).to(module.weight.dtype))
+ 
+@@ -103,11 +123,43 @@ def load_diff(model, diff_dir):
+ 
+     model.config.vocab_size = model.lm_head.weight.size(0)
+ 
+-def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, device):
++def decomposition(masked_input_tensor,dim):
++    U , S , V = torch.svd(masked_input_tensor)
++    total_sum , partial_sum = torch.sum(S) , torch.sum(S[:128])
++    # import pdb; pdb.set_trace()
++    U , S , V = U[:, :dim],S[:dim] ,V[:, :dim]
++    return torch.mm(torch.mm(U, torch.diag(S)), V.t())
++
++def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, device,layers=None):
+     base_model = get_model(base_model_name, device)
+     tokenizer = get_tokenizer(finetuned_model_name)
++    
++    finetuned_model = get_model(finetuned_model_name, device)
++    params = {}
++    
++    for k ,v in finetuned_model.named_parameters():
++        if layers is not None:
++            for layer in layers:
++                if layer in k:
++                    if "mlp" in k or "self_attn" in k:
++                        delta =  v.detach().cpu() - base_model.get_submodule(k.replace('.weight',"")).weight.detach().cpu()
++                        dim = 128
++                        if "mlp" in k:  
++                            dim = int(dim * 1.45)
++                        # import pdb; pdb.set_trace()
++                        params[k] = decomposition(delta.to(torch.float32), dim).to(torch.bfloat16)
++
++    # import pdb; pdb.set_trace()
++    # dict(base_model.named_parameters())['model.layers.0.self_attn.o_proj.weight']
++    
++    with torch.no_grad():
++        for param in params:
++            base_model.get_submodule(param.replace('.weight',"")).weight.add_(params[param].detach().to(device))
++        
++    # import pdb; pdb.set_trace()   
+     load_diff(base_model, diff_dir)
+-
++    
++     
+     base_model.save_pretrained(save_dir)
+     tokenizer.save_pretrained(save_dir)
+ 
+diff --git a/bitdelta/train.py b/bitdelta/train.py
+index 946dafb..4b5e1a8 100644
+--- a/bitdelta/train.py
++++ b/bitdelta/train.py
+@@ -37,7 +37,7 @@ if args.debug:
+ finetuned_compressed_model = get_model(args.finetuned_model, args.finetuned_compressed_model_device, args.finetuned_compressed_model_memory_map)
+ 
+ print(f"compressing diff...")
+-compress_diff(base_model, finetuned_model, finetuned_compressed_model)
++compress_diff(base_model, finetuned_model, finetuned_compressed_model,layers=args.layers)
+ 
+ train_num_samples = args.batch_size * args.num_steps
+ train_dataset = get_dataset(
+@@ -55,7 +55,7 @@ train_dataloader = get_dataloader(
+ )
+ 
+ # save untrained delta
+-save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff_untrained.pt"))
++save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff_untrained.pt"),layers=args.layers)
+ 
+ optimizer = torch.optim.AdamW(finetuned_compressed_model.parameters(), lr=args.lr)
+ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_steps)
+@@ -64,28 +64,28 @@ bar = tqdm(train_dataloader)
+ 
+ train_loss_list = []
+ 
+-# Train loop
+-for step, batch in enumerate(bar):
+-    batch1 = {k: v.to(finetuned_model.device) for k, v in batch.items()}
+-    with torch.inference_mode():
+-        finetuned_outputs = finetuned_model(**batch1)
++# # Train loop
++# for step, batch in enumerate(bar):
++#     batch1 = {k: v.to(finetuned_model.device) for k, v in batch.items()}
++#     with torch.inference_mode():
++#         finetuned_outputs = finetuned_model(**batch1)
+ 
+-    batch2 = {k: v.to(finetuned_compressed_model.device) for k, v in batch.items()}
+-    finetuned_compressed_outputs = finetuned_compressed_model(**batch2)
++#     batch2 = {k: v.to(finetuned_compressed_model.device) for k, v in batch.items()}
++#     finetuned_compressed_outputs = finetuned_compressed_model(**batch2)
+ 
+-    loss = F.mse_loss(
+-        finetuned_outputs.logits.clone().to(finetuned_compressed_outputs.logits.device),
+-        finetuned_compressed_outputs.logits,
+-    )
++#     loss = F.mse_loss(
++#         finetuned_outputs.logits.clone().to(finetuned_compressed_outputs.logits.device),
++#         finetuned_compressed_outputs.logits,
++#     )
+ 
+-    train_loss_list.append(loss.item())
++#     train_loss_list.append(loss.item())
+ 
+-    optimizer.zero_grad()
+-    loss.backward()
+-    optimizer.step()
+-    scheduler.step()
++#     optimizer.zero_grad()
++#     loss.backward()
++#     optimizer.step()
++#     scheduler.step()
+ 
+-    bar.set_description(f"train loss: {loss.item()}")
++#     bar.set_description(f"train loss: {loss.item()}")
+ 
+ 
+ # save loss list
+@@ -93,14 +93,14 @@ if args.debug:
+     with open(os.path.join(args.save_dir, f"train_loss_{args.num_groups}.json"), "w") as f:
+         json.dump(train_loss_list, f)
+ 
+-# save trained delta
+-save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff.pt"))
++# # save trained delta
++# save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff.pt"),layer=args.layer)
+ 
+ del base_model, finetuned_model, finetuned_compressed_model
+ torch.cuda.empty_cache()
+ 
+ if args.save_full_model:
+     print("saving uncalibrated model")
+-    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), os.path.join(args.save_dir, "uncalibrated_model"), device="cpu")
+-    print("saving calibrated model")
+-    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff.pt"), os.path.join(args.save_dir, "calibrated_model"), device="cpu")
++    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), os.path.join(args.save_dir, f"uncalibrated_model_{args.save_num}"), device="cpu",layers=args.layers)
++    # print("saving calibrated model")
++    # save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff.pt"), os.path.join(args.save_dir, "calibrated_model"), device="cpu")
+diff --git a/bitdelta/train2.py b/bitdelta/train2.py
+new file mode 100644
+index 0000000..37c9c70
+--- /dev/null
++++ b/bitdelta/train2.py
+@@ -0,0 +1,37 @@
++import os
++
++import torch
++
++import torch.nn.functional as F
++from bitdelta.diff import compress_diff, save_diff, save_full_model
++from bitdelta.misc import find_corr_stddev
++
++from bitdelta.utils import get_model, parse_args, get_tokenizer
++from tqdm import tqdm
++from bitdelta.data import get_dataset, get_dataloader
++
++import json
++
++args = parse_args()
++
++# create save_dir if it doesn't exist
++os.makedirs(args.save_dir, exist_ok=True)
++
++tokenizer = get_tokenizer(args.base_model)
++
++with torch.no_grad():
++    base_model = get_model(args.base_model, args.base_model_device, args.base_model_memory_map)
++    finetuned_model = get_model(args.finetuned_model, args.finetuned_model_device, args.finetuned_model_memory_map)
++
++finetuned_compressed_model = get_model(args.finetuned_model, args.finetuned_compressed_model_device, args.finetuned_compressed_model_memory_map)
++
++print(f"compressing diff...")
++compress_diff(base_model, finetuned_model, finetuned_compressed_model)
++
++# save untrained delta
++save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff_untrained.pt"))
++
++
++if args.save_full_model:
++    print("saving uncalibrated model")
++    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), os.path.join(args.save_dir, "uncalibrated_model"), device="cpu")
+diff --git a/bitdelta/utils.py b/bitdelta/utils.py
+index a7c55ea..7523ed8 100644
+--- a/bitdelta/utils.py
++++ b/bitdelta/utils.py
+@@ -21,6 +21,8 @@ def parse_args():
+     parser.add_argument("--lr", type=float, default=1e-4)
+     parser.add_argument("--num_steps", type=int, default=100)
+     parser.add_argument("--batch_size", type=int, default=4)
++    parser.add_argument("--layers", nargs='+', default=None)
++    parser.add_argument("--save_num", type=int, default=0)
+     parser.add_argument("--max_length", type=int, default=128)
+     parser.add_argument("--save_dir", type=str, required=True)
+ 
+@@ -102,6 +104,7 @@ def get_model(model_name, device, memory_map=None):
+     else: # single-gpu or cpu
+         return transformers.AutoModelForCausalLM.from_pretrained(
+             model_name,
++            # torch_dtype=torch.float16,
+             torch_dtype=torch.bfloat16,
+             low_cpu_mem_usage=True,
+         ).to(device)
+diff --git a/eval.py b/eval.py
+new file mode 100644
+index 0000000..5e813b1
+--- /dev/null
++++ b/eval.py
+@@ -0,0 +1,30 @@
++import argparse
++import transformers
++import torch
++from transformers import AutoConfig, AutoModelForCausalLM
++
++def load_model(model_name):
++    model = transformers.AutoModelForCausalLM.from_pretrained(
++                model_name,
++                torch_dtype=torch.bfloat16,
++                low_cpu_mem_usage=True,)
++    return model  
++
++if __name__ == '__main__':
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--base_model', type=str)
++    parser.add_argument('--finetuned_model', type=str)
++    args = parser.parse_args()
++
++    base_model = load_model(args.base_model)
++    finetuned_model = load_model(args.finetuned_model)
++    
++    params = dict()
++    
++    for n,p in finetuned_model.named_parameters():
++        if "mlp" in n or "self_attn" in n:
++            delta = p - base_model.state_dict()[n]
++            w = torch.sum(torch.abs(delta))
++            params[n] = w.item()
++    
++    print(params)
+\ No newline at end of file
+diff --git a/lowbit_lowrank.py b/lowbit_lowrank.py
+new file mode 100644
+index 0000000..4f159ff
+--- /dev/null
++++ b/lowbit_lowrank.py
+@@ -0,0 +1,23 @@
++import os
++
++import torch
++
++import torch.nn.functional as F
++from bitdelta.diff import compress_diff, save_diff, save_full_model
++from bitdelta.misc import find_corr_stddev
++
++from bitdelta.utils import get_model, parse_args, get_tokenizer
++from tqdm import tqdm
++
++args = parse_args()
++
++tokenizer = get_tokenizer(args.base_model)
++
++with torch.no_grad():
++    base_model = get_model(args.base_model, args.base_model_device, args.base_model_memory_map)
++    finetuned_model = get_model(args.finetuned_model, args.finetuned_model_device, args.finetuned_model_memory_map)
++
++finetuned_compressed_model = get_model(args.finetuned_model, args.finetuned_compressed_model_device, args.finetuned_compressed_model_memory_map)
++
++print(f"compressing diff...")
++compress_diff(base_model, finetuned_model, finetuned_compressed_model)
+diff --git a/run.sh b/run.sh
+new file mode 100644
+index 0000000..f26ced1
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1,17 @@
++MODEL_SAVE_DIR=save/
++
++mkdir -p $MODEL_SAVE_DIR
++
++
++CUDA_VISIBLE_DEVICES=0,1 python \
++    bitdelta/train.py \
++    --base_model /data/public/opensource_models/meta-llama/Llama-2-7b-hf/ \
++    --finetuned_model /data/public/opensource_models/meta-llama/Llama-2-7b-chat-hf/ \
++    --save_dir $MODEL_SAVE_DIR \
++    --batch_size 4 \
++    --num_steps 200 \
++    --save_num 0\
++    --save_full_model True
++
++    # --layers "layers.5."\
++    # /data/public/opensource_models/WizardLM/WizardMath-7B-V1.0/
+diff --git a/scripts/ppl_eval_example.bash b/scripts/ppl_eval_example.bash
+index ee6cc6a..ba45351 100644
+--- a/scripts/ppl_eval_example.bash
++++ b/scripts/ppl_eval_example.bash
+@@ -1,8 +1,10 @@
++PPL_SAVE_DIR=save
++
+ CUDA_VISIBLE_DEVICES=0 python \
+     bitdelta/eval_ppl.py \
+-    --base_model meta-llama/Llama-2-7b-hf \
++    --base_model /home/pingbowen/workspace/delta-compression/BitDelta/save/calibrated_model \
+     --dataset_name wikitext \
+     --subset wikitext-2-raw-v1 \
+     --save_dir $PPL_SAVE_DIR \
+     --num_eval_samples 100 \
+-    --model_diff $MODEL_SAVE_DIR/diff.pt \
+\ No newline at end of file
++    # --model_diff $MODEL_SAVE_DIR/diff.pt \
+\ No newline at end of file
+diff --git a/tailor.py b/tailor.py
+new file mode 100755
+index 0000000..cf3143e
+--- /dev/null
++++ b/tailor.py
+@@ -0,0 +1,186 @@
++import argparse
++import jsonlines
++import sys
++import shutil
++import logging
++import os
++import time
++from tqdm import tqdm
++import glob
++import json
++import torch
++import datasets
++from transformers import AutoTokenizer, AutoModelForCausalLM
++# from vllm import LLM, SamplingParams
++import re
++import random
++import numpy as np
++
++pretrained_model_name = "/data/public/opensource_models/meta-llama/Llama-2-7b-hf"
++
++finetuned_model_name = "/data/public/opensource_models/meta-llama/Llama-2-7b-chat-hf" # /data/public/wangshuo/exp/ft-en-magicoder-llama-2-7b/ckpts/checkpoints/epoch_2_hf
++
++pretrained_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=pretrained_model_name,
++                                        device_map="cpu")
++pretrained_tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=pretrained_model_name)
++finetuned_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=finetuned_model_name,
++                                     device_map="cpu")
++finetuned_tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=finetuned_model_name)
++
++save_dir = "/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_model"
++
++def set_random_seed(seed: int = 0):
++    """
++    set random seed
++    :param seed: int, random seed
++    :return:
++    """
++    random.seed(seed)
++    np.random.seed(seed)
++    torch.manual_seed(seed)
++    if torch.cuda.is_available():
++        torch.cuda.manual_seed_all(seed)
++    torch.backends.cudnn.deterministic = True
++    torch.backends.cudnn.benchmark = False
++
++set_random_seed(seed=0)
++# scale_factor = finetuned_model.config.intermediate_size / finetuned_model.config.hidden_size
++
++
++def get_param_names_to_merge(input_param_names: list, exclude_param_names_regex: list):
++    """
++    get the names of parameters that need to be merged
++    :param input_param_names: list, names of input parameters
++    :param exclude_param_names_regex: list, regular expression of names of parameters that need to be excluded
++    :return:
++    """
++    param_names_to_merge = []
++    for param_name in input_param_names:
++        exclude = any([re.match(exclude_pattern, param_name) for exclude_pattern in exclude_param_names_regex])
++        if not exclude:
++            param_names_to_merge.append(param_name)
++    return param_names_to_merge
++
++
++
++task_vector_param_dict = {}
++pretrained_param_dict = {param_name: param_value for param_name, param_value in pretrained_model.named_parameters()}
++finetuned_param_dict = {param_name: param_value for param_name, param_value in finetuned_model.named_parameters()}
++# param_names_to_merge = get_param_names_to_merge(input_param_names=list(pretrained_param_dict.keys()), exclude_param_names_regex=[])
++# with torch.no_grad():
++#     for param_name in finetuned_param_dict.keys():
++#         task_vector_param_dict[param_name] = finetuned_param_dict[param_name] - pretrained_param_dict[param_name]
++#         print(f"name {param_name} data {task_vector_param_dict[param_name]} ")
++
++
++# import pdb
++# pdb.set_trace()
++
++def decomposition(masked_input_tensor,dim):
++
++    U , S , V = torch.svd(masked_input_tensor)
++    U , S , V = U[:, :dim],S[:dim],V[:, :dim]
++    # return torch.mm(U, torch.diag(S)), V.t()
++    # return U, torch.mm(torch.diag(S), V.t())   #return lora_B, lora_A
++    return torch.mm(torch.mm(U, torch.diag(S)), V.t())
++
++# dim = 256
++dim = 128
++# dim = 16
++print("----------------------dim: ",dim)
++print("----------------------dim: ",dim)
++print("----------------------dim: ",dim)
++print("----------------------dim: ",dim)
++print("----------------------dim: ",dim)
++print("----------------------dim: ",dim)
++
++peft_dict = {}
++malign_dict = {}
++other_dict = {}
++
++# finetuned_param_dict
++# for param_name, param_value in tqdm(pretrained_param_dict.items()):
++#     if "self_attn" in param_name or "mlp" in param_name:
++#         pass
++#     else:
++#         other_dict[param_name] = param_value.contiguous()
++
++diff = dict()
++
++for param_name, param_value in tqdm(finetuned_param_dict.items()):
++    if "self_attn" in param_name or "mlp" in param_name:
++        delta = param_value - pretrained_param_dict[param_name]
++        if "mlp" in param_name:
++            dim = int(dim * 1.45)
++        delta = decomposition(delta,dim=dim)
++        diff[param_name] = (pretrained_param_dict[param_name] + delta).contiguous()
++    else:
++        diff[param_name] = param_value.contiguous()
++        # lora_A = lora_A * (dim/16)  ###补偿scaling, 以后的alpha可以统一为16
++        # peft_key = "base_model.model." + param_name.split(".weight")[0]
++        # print(peft_key+".lora_A.weight")
++        # peft_dict[peft_key+".lora_A.weight"] = lora_A.contiguous()
++        # peft_dict[peft_key+".lora_B.weight"] = lora_B.contiguous()
++
++for n,p in pretrained_model.named_parameters():
++    p.data.copy_(diff[n])
++    
++pretrained_model.save_pretrained(save_dir)
++finetuned_tokenizer.save_pretrained(save_dir)
++
++# other_dict = {k: v.to(torch.float16) for k, v in other_dict.items()}
++
++# other_para_path = "/home/wanghanqing/projects/exp/mAlign_exp/lang_LoRAs/peft_ver/trim_lora/code/other_param"
++# torch.save(other_dict, os.path.join(other_para_path, "other.pt"))
++# torch.save(other_dict, os.path.join(other_para_path, "pretrain_other.pt"))
++
++
++# peft_dict = {k: v.to(torch.float16) for k, v in peft_dict.items()}
++
++# layernum = 40
++# for lnum in range(layernum):
++#     peft_pfx = f"base_model.model.model.layers.{lnum}"
++#     delta_pfx = f"encoder.layers.{lnum}" 
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.project_q_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.self_attn.q_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.project_q_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.self_attn.q_proj.lora_B.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.project_k_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.self_attn.k_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.project_k_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.self_attn.k_proj.lora_B.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.project_v_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.self_attn.v_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.project_v_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.self_attn.v_proj.lora_B.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.attention_out_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.self_attn.o_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.self_att.self_attention.attention_out_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.self_attn.o_proj.lora_B.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.ffn.ffn.w_in.w_0_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.mlp.gate_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.ffn.ffn.w_in.w_0_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.mlp.gate_proj.lora_B.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.ffn.ffn.w_in.w_1_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.mlp.up_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.ffn.ffn.w_in.w_1_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.mlp.up_proj.lora_B.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.ffn.ffn.w_out_lora.lora_A.weight"] = peft_dict[f"{peft_pfx}.mlp.down_proj.lora_A.weight"].contiguous()
++#     malign_dict[f"{delta_pfx}.ffn.ffn.w_out_lora.lora_B.weight"] = peft_dict[f"{peft_pfx}.mlp.down_proj.lora_B.weight"].contiguous()
++
++
++
++
++
++# malign_dict = {k: v.to(torch.float16) for k, v in malign_dict.items()}
++
++# import pdb
++# pdb.set_trace()
++
++output_peft_path = "/home/wanghanqing/projects/exp/mAlign_exp/lang_LoRAs/peft_ver/trim_lora/dim256_2/code"
++output_malign_path = "/home/wanghanqing/projects/exp/mAlign_exp/mAlign_LoRAs/trim_lora/dim256_2/code"
++
++# torch.save(peft_dict, os.path.join(output_peft_path, "adapter_model.bin"))
++# torch.save(malign_dict, os.path.join(output_malign_path, "lora.pt"))
++
++
++print("--end--")
++
++
++# for param_name, param_value in finetuned_model.named_parameters():
++#     if param_name in masked_param_dict:
++#         param_value.data.copy_(masked_param_dict[param_name])
++
++# logger.info(f"saving model at {save_model_path}...")
++# os.makedirs(save_model_path, exist_ok=True)
++# finetuned_model.save_pretrained(save_directory=save_model_path)
++# finetuned_tokenizer.save_pretrained(save_directory=save_model_path)
++# logger.info(f"model is saved")
+\ No newline at end of file
+diff --git a/test.py b/test.py
+new file mode 100644
+index 0000000..0939679
+--- /dev/null
++++ b/test.py
+@@ -0,0 +1,95 @@
++import argparse
++import transformers
++import torch
++from transformers import AutoConfig, AutoModelForCausalLM
++from accelerate import infer_auto_device_map, init_empty_weights
++import torch.nn as nn
++import os
++
++def get_tokenizer(tokenizer_name):
++    tokenizer = transformers.AutoTokenizer.from_pretrained(
++        tokenizer_name, use_fast=False, 
++    )
++
++    if tokenizer.pad_token_id is None:
++        if tokenizer.eos_token_id is not None:
++            tokenizer.pad_token_id = tokenizer.eos_token_id
++        else:
++            tokenizer.pad_token_id = 0
++
++    return tokenizer
++
++@torch.no_grad()
++def load_diff(model, diff_dir):
++    device = model.device
++    diff_dict = torch.load(diff_dir)
++
++    for name, module in model.named_modules():
++        if name + ".mask" in diff_dict:
++            coeff = diff_dict[name + ".coeff"].to(device)
++            mask = diff_dict[name + ".mask"].to(device)
++
++            setattr(module, "mask", mask)
++            setattr(module, "coeff", coeff)
++            # module.weight.add_((mask * coeff).to(module.weight.dtype))
++        elif name + ".weight" in diff_dict:
++            module.weight = nn.Parameter(diff_dict[name + ".weight"].to(device).to(module.weight.dtype))
++
++        elif name + '.A' in diff_dict:
++            A = diff_dict[name + '.A'].to(device)
++            B = diff_dict[name + '.B'].to(device)
++
++            mask = (A @ B).T
++            module.weight.add_(mask.to(module.weight.dtype))
++
++    model.config.vocab_size = model.lm_head.weight.size(0)
++
++
++def get_model(model_name, device, memory_map=None):
++    # multi-gpu
++    if device == "auto" or isinstance(device, list):
++        
++        # if gpus are specified, distributes according to the memory map
++        if isinstance(device, list):
++            assert memory_map is not None, "memory_map must be specified when using multiple gpus"
++            config = AutoConfig.from_pretrained(model_name)
++            with init_empty_weights():
++                model = AutoModelForCausalLM.from_config(config)
++
++            device_map = infer_auto_device_map(model, memory_map, no_split_module_classes=["LlamaDecoderLayer"])
++
++        else:
++            # use all available gpus
++            device_map = "auto"
++
++        return transformers.AutoModelForCausalLM.from_pretrained(
++            model_name,
++            torch_dtype=torch.bfloat16,
++            device_map=device_map,
++        )
++    else: # single-gpu or cpu
++        return transformers.AutoModelForCausalLM.from_pretrained(
++            model_name,
++            torch_dtype=torch.bfloat16,
++            low_cpu_mem_usage=True,
++        ).to(device)
++
++
++def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, device):
++    base_model = get_model(base_model_name, device)
++    tokenizer = get_tokenizer(finetuned_model_name)
++    load_diff(base_model, diff_dir)
++
++    base_model.save_pretrained(save_dir)
++    tokenizer.save_pretrained(save_dir)
++
++    del base_model
++
++base_model = get_model("/data/public/opensource_models/meta-llama/Llama-2-7b-hf/", "cuda")
++
++
++
++base_model.get_submodule('model.layers.28.self_attn.o_proj')
++import pdb; pdb.set_trace()
++# get_tokenizer("/data/public/opensource_models/WizardLM/WizardMath-7B-V1.0/")
++# save_full_model("/data/public/opensource_models/meta-llama/Llama-2-7b-hf/", "/data/public/opensource_models/WizardLM/WizardMath-7B-V1.0/", os.path.join("/home/pingbowen/workspace/delta-compression/BitDelta/save", "diff_untrained.pt"), os.path.join("/home/pingbowen/workspace/delta-compression/BitDelta/save", "uncalibrated_model"), device="cuda")
+\ No newline at end of file
+-- 
+2.25.1
+
