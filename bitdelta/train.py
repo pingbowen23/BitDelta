@@ -57,35 +57,36 @@ train_dataloader = get_dataloader(
 # save untrained delta
 save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff_untrained.pt"),layers=args.layers)
 
-optimizer = torch.optim.AdamW(finetuned_compressed_model.parameters(), lr=args.lr)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_steps)
+if args.train:
+    optimizer = torch.optim.AdamW(finetuned_compressed_model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_steps)
 
-bar = tqdm(train_dataloader)
+    bar = tqdm(train_dataloader)
 
-train_loss_list = []
+    train_loss_list = []
 
-# # Train loop
-# for step, batch in enumerate(bar):
-#     batch1 = {k: v.to(finetuned_model.device) for k, v in batch.items()}
-#     with torch.inference_mode():
-#         finetuned_outputs = finetuned_model(**batch1)
+    # # Train loop
+    for step, batch in enumerate(bar):
+        batch1 = {k: v.to(finetuned_model.device) for k, v in batch.items()}
+        with torch.inference_mode():
+            finetuned_outputs = finetuned_model(**batch1)
 
-#     batch2 = {k: v.to(finetuned_compressed_model.device) for k, v in batch.items()}
-#     finetuned_compressed_outputs = finetuned_compressed_model(**batch2)
+        batch2 = {k: v.to(finetuned_compressed_model.device) for k, v in batch.items()}
+        finetuned_compressed_outputs = finetuned_compressed_model(**batch2)
 
-#     loss = F.mse_loss(
-#         finetuned_outputs.logits.clone().to(finetuned_compressed_outputs.logits.device),
-#         finetuned_compressed_outputs.logits,
-#     )
+        loss = F.mse_loss(
+            finetuned_outputs.logits.clone().to(finetuned_compressed_outputs.logits.device),
+            finetuned_compressed_outputs.logits,
+        )
 
-#     train_loss_list.append(loss.item())
+        train_loss_list.append(loss.item())
 
-#     optimizer.zero_grad()
-#     loss.backward()
-#     optimizer.step()
-#     scheduler.step()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
 
-#     bar.set_description(f"train loss: {loss.item()}")
+        bar.set_description(f"train loss: {loss.item()}")
 
 
 # save loss list
@@ -94,13 +95,15 @@ if args.debug:
         json.dump(train_loss_list, f)
 
 # # save trained delta
-# save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff.pt"),layer=args.layer)
+save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff.pt"),layer=args.layer)
 
 del base_model, finetuned_model, finetuned_compressed_model
 torch.cuda.empty_cache()
 
 if args.save_full_model:
     print("saving uncalibrated model")
-    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), os.path.join(args.save_dir, f"uncalibrated_model_{args.save_num}"), device="cpu",layers=args.layers)
-    # print("saving calibrated model")
-    # save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff.pt"), os.path.join(args.save_dir, "calibrated_model"), device="cpu")
+    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), args.save_dir, device="cpu",layers=args.layers)
+    
+    if args.train:
+        print("saving calibrated model")
+        save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff.pt"), os.path.join(args.save_dir, "calibrated_model"), device="cpu")

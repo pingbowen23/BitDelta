@@ -16,9 +16,9 @@ import re
 import random
 import numpy as np
 
-pretrained_model_name = "/data/public/opensource_models/meta-llama/Llama-2-7b-hf"
+pretrained_model_name = "/data/public/opensource_models/meta-llama/Llama-2-13b-hf"
 
-finetuned_model_name = "/data/public/opensource_models/meta-llama/Llama-2-7b-chat-hf" # /data/public/wangshuo/exp/ft-en-magicoder-llama-2-7b/ckpts/checkpoints/epoch_2_hf
+finetuned_model_name = "/data/public/opensource_models/meta-llama/Llama-2-13b-chat-hf" # /data/public/wangshuo/exp/ft-en-magicoder-llama-2-7b/ckpts/checkpoints/epoch_2_hf
 
 pretrained_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=pretrained_model_name,
                                         device_map="cpu")
@@ -27,7 +27,7 @@ finetuned_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_
                                      device_map="cpu")
 finetuned_tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=finetuned_model_name)
 
-save_dir = "/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_model"
+save_dir = "/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_model_13b"
 
 def set_random_seed(seed: int = 0):
     """
@@ -85,7 +85,7 @@ def decomposition(masked_input_tensor,dim):
     return torch.mm(torch.mm(U, torch.diag(S)), V.t())
 
 # dim = 256
-dim = 128
+dim = 160
 # dim = 16
 print("----------------------dim: ",dim)
 print("----------------------dim: ",dim)

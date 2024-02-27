@@ -9,14 +9,19 @@ class BinaryDiff(nn.Module):
     def __init__(self, base, finetune):
         super().__init__()
         diff = finetune - base
-        # diff = decomposition(diff, 2048)
+        diff_a, diff_b = decomposition(diff, 2048)
         quantile = diff.float().abs().mean()
 
-        mask = torch.ones_like(diff)
-        mask[diff < 0] = 0
-        mask = pack(mask.bool().T)
-     
-        self.register_buffer("mask", mask)
+        mask_a, mask_b = torch.ones_like(diff_a) , torch.ones_like(diff_b)
+        mask_a[diff_a < 0], mask_b[diff_b < 0] = 0, 0
+        
+        # mask[diff < 0] = 0
+        mask_a = pack(mask_a.bool().T)
+        mask_b = pack(mask_b.bool().T)
+        
+        self.register_buffer("mask_a", mask_a)
+        self.register_buffer("mask_b", mask_b)
+        
         self.register_buffer("base", base.T)
         self.register_parameter(
             "coeff",
@@ -82,7 +87,8 @@ def save_diff(finetuned_compressed_model, save_dir,layers=None):
     for name, module in finetuned_compressed_model.named_modules():
         if isinstance(module, BinaryDiff):
             # diff_dict[name + ".mask"] = (module.mask == 1).bool().cpu()
-            diff_dict[name + ".mask"] = module.mask.cpu()
+            diff_dict[name + ".mask_a"] = module.mask_a.cpu()
+            diff_dict[name + ".mask_b"] = module.mask_b.cpu()
             diff_dict[name + ".coeff"] = module.coeff.cpu()
 
     for name, param in finetuned_compressed_model.named_parameters():
@@ -96,15 +102,20 @@ def load_diff(model, diff_dir):
     device = model.device
     diff_dict = torch.load(diff_dir)
 
+    import pdb; pdb.set_trace()
+    
     for name, module in model.named_modules():
-        if name + ".mask" in diff_dict:
+        if name + ".mask_a" in diff_dict:
             coeff = diff_dict[name + ".coeff"].to(device)
-            mask = diff_dict[name + ".mask"].to(device)
-
+            mask_a = diff_dict[name + ".mask_a"].to(device)
+            mask_b = diff_dict[name + ".mask_b"].to(device)
             # setattr(module, "mask", mask)
-            # setattr(module, "coeff", coeff)
-            weight = (unpack(mask)*2-1) * coeff
-
+            # setattr(module, "coeff", coeff) 
+            weight_a = (unpack(mask_a)*2-1) 
+            weight_b = (unpack(mask_b)*2-1) 
+            
+            weight = (weight_b @ weight_a) * coeff
+            # import pdb; pdb.set_trace()
             module.weight.add_(weight.T.to(module.weight.dtype))
         elif name + ".weight" in diff_dict:
             module.weight = nn.Parameter(diff_dict[name + ".weight"].to(device).to(module.weight.dtype))
@@ -119,11 +130,12 @@ def load_diff(model, diff_dir):
     model.config.vocab_size = model.lm_head.weight.size(0)
 
 def decomposition(masked_input_tensor,dim):
+    masked_input_tensor = masked_input_tensor.to(torch.float32)
+    
     U , S , V = torch.svd(masked_input_tensor)
     total_sum , partial_sum = torch.sum(S) , torch.sum(S[:128])
-    # import pdb; pdb.set_trace()
     U , S , V = U[:, :dim],S[:dim] ,V[:, :dim]
-    return torch.mm(torch.mm(U, torch.diag(S)), V.t())
+    return torch.mm(U, torch.diag(S)).to(torch.bfloat16), V.t().to(torch.bfloat16)
 
 def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, device,layers=None):
     base_model = get_model(base_model_name, device)
@@ -132,29 +144,28 @@ def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, d
     finetuned_model = get_model(finetuned_model_name, device)
     params = {}
     
-    for k ,v in finetuned_model.named_parameters():
-        if layers is not None:
-            for layer in layers:
-                if layer in k:
-                    if "mlp" in k or "self_attn" in k:
-                        delta =  v.detach().cpu() - base_model.get_submodule(k.replace('.weight',"")).weight.detach().cpu()
-                        dim = 128
-                        if "mlp" in k:  
-                            dim = int(dim * 1.45)
-                        # import pdb; pdb.set_trace()
-                        params[k] = decomposition(delta.to(torch.float32), dim).to(torch.bfloat16)
+    # for k ,v in finetuned_model.named_parameters():
+    #     if layers is not None:
+    #         for layer in layers:
+    #             if layer in k:
+    #                 if "mlp" in k or "self_attn" in k:
+    #                     delta =  v.detach().cpu() - base_model.get_submodule(k.replace('.weight',"")).weight.detach().cpu()
+    #                     dim = 128
+    #                     if "mlp" in k:  
+    #                         dim = int(dim * 1.45)
+    #                     # import pdb; pdb.set_trace()
+    #                     params[k] = decomposition(delta.to(torch.float32), dim).to(torch.bfloat16)
 
     # import pdb; pdb.set_trace()
     # dict(base_model.named_parameters())['model.layers.0.self_attn.o_proj.weight']
     
-    with torch.no_grad():
-        for param in params:
-            base_model.get_submodule(param.replace('.weight',"")).weight.add_(params[param].detach().to(device))
+    # with torch.no_grad():
+    #     for param in params:
+    #         base_model.get_submodule(param.replace('.weight',"")).weight.add_(params[param].detach().to(device))
         
     # import pdb; pdb.set_trace()   
     load_diff(base_model, diff_dir)
     
-     
     base_model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
 

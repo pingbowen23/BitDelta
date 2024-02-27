@@ -25,13 +25,14 @@ def parse_args():
     parser.add_argument("--save_num", type=int, default=0)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--save_dir", type=str, required=True)
-
+    parser.add_argument("--save_diff_dir", type=str, required=True)
 
     # device management
     parser.add_argument("--base_model_device", type=str, default="0")
     parser.add_argument("--finetuned_model_device", type=str, default="0")
     parser.add_argument("--finetuned_compressed_model_device", type=str, default="1")
     parser.add_argument("--save_full_model", type=bool, default=False)
+    parser.add_argument("--train", action="store_true", default=None)
 
     # multi-gpu support (assumes fp32, should 2x since we use bf16)
     # Example: --finetuned_model_memory_map "{\"0\": \"150GiB\", \"1\": \"150GiB\"}"
