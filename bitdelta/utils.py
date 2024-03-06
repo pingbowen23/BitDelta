@@ -14,6 +14,7 @@ def parse_args():
     parser.add_argument("--base_model", type=str, default="meta-llama/Llama-2-7b-hf")
 
     # train params
+    parser.add_argument("--train", action="store_true") 
     parser.add_argument("--dataset_name", type=str, default="c4")
     parser.add_argument("--subset", type=str, default="en")
     parser.add_argument("--data_dir", type=str, default="en")
@@ -25,12 +26,11 @@ def parse_args():
     parser.add_argument("--save_num", type=int, default=0)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--save_dir", type=str, required=True)
-    parser.add_argument("--train", action="store_true")
 
     # device management
     parser.add_argument("--base_model_device", type=str, default="0")
-    parser.add_argument("--finetuned_model_device", type=str, default="0")
-    parser.add_argument("--finetuned_compressed_model_device", type=str, default="1")
+    parser.add_argument("--finetuned_model_device", type=str, default="1")
+    parser.add_argument("--finetuned_compressed_model_device", type=str, default="2")
     parser.add_argument("--save_full_model", type=bool, default=False)
 
     # multi-gpu support (assumes fp32, should 2x since we use bf16)
@@ -81,8 +81,8 @@ def parse_device(device: str):
 
 def get_model(model_name, device, memory_map=None):
     # multi-gpu
+    # import pdb; pdb.set_trace()
     if device == "auto" or isinstance(device, list):
-        
         # if gpus are specified, distributes according to the memory map
         if isinstance(device, list):
             assert memory_map is not None, "memory_map must be specified when using multiple gpus"
@@ -104,7 +104,6 @@ def get_model(model_name, device, memory_map=None):
     else: # single-gpu or cpu
         return transformers.AutoModelForCausalLM.from_pretrained(
             model_name,
-            # torch_dtype=torch.float16,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         ).to(device)

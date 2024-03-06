@@ -67,13 +67,9 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,layers
 
     # TODO: this can be parallelized
     for name, module in finetuned_compressed_model.named_modules():
-        if "mlp" in name or "self_attn" in name:
-            
-            if Pass(layers,name) == True:
-                continue
-            
+        if "experts" in name :
             for subname, submodule in module.named_children():
-                if "proj" in subname:
+                if ".w" in subname:
                     compress_submodule(name, subname, module, submodule)
 
 def save_diff(finetuned_compressed_model, save_dir,layers=None):
@@ -105,8 +101,8 @@ def load_diff(model, diff_dir):
             # setattr(module, "coeff", coeff)
             weight = (unpack(mask)*2-1) * coeff
             
-            if "mlp" in name:
-                weight = decomposition(weight, 1024)
+            # if "mlp" in name:
+            #     weight = decomposition(weight, 1024)
 
             module.weight.add_(weight.T.to(module.weight.dtype))
         elif name + ".weight" in diff_dict:
