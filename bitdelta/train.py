@@ -44,13 +44,12 @@ finetuned_compressed_model = transformers.AutoModelForCausalLM.from_pretrained(
             # device_map="auto"   
         ).to("cpu")
 
-print(f"compressing diff...")
 
 class BinaryDiff(nn.Module):
     def __init__(self, base, finetune):
         super().__init__()
         diff = finetune - base
-        # diff = decomposition(diff, 2048)
+        # diff = finetune
         quantile = diff.float().abs().mean()
 
         mask = torch.ones_like(diff)
@@ -94,24 +93,31 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,layers
             finetune=finetuned_weight,
         ).to(target_device)
 
+        # import pdb ; pdb.set_trace()
+        
         del submodule, base_weight
-        setattr(module, subname, None)
+        setattr(module, subsubname, None)
+        # setattr(module + "." + subname, subsubname, None)
         gc.collect()
         torch.cuda.empty_cache()
-        setattr(module, subname, compressed)
+        setattr(module, subsubname, compressed)
+        # setattr(module + "." + subname, subsubname, compressed)
+        # import pdb ; pdb.set_trace()
 
     # TODO: this can be parallelized
     for name, module in finetuned_compressed_model.named_modules():
-        if "experts" in name :
+        if "experts" in name:
             for subname, submodule in module.named_children():
                 if "0" not in subname:
                     for subsubname, subsubmodule in submodule.named_children():
                         if "w" in subsubname:
-                            # import pdb ; pdb.set_trace()
-                            compress_submodule(name, subname, subsubname,module, subsubmodule)
+                            compress_submodule(name, subname, subsubname,submodule, subsubmodule)
+    # import pdb ; pdb.set_trace()
 
    
 compress_diff(base_model, finetuned_model, finetuned_compressed_model,layers=args.layers)
+
+# import pdb ; pdb.set_trace()
 
 train_num_samples = args.batch_size * args.num_steps
 train_dataset = get_dataset(
@@ -129,6 +135,7 @@ train_dataloader = get_dataloader(
 )
 
 # save untrained delta
+print("saving untrained diff")
 save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff_untrained.pt"),layers=args.layers)
 
 if args.train:
@@ -169,13 +176,13 @@ if args.train:
 #         json.dump(train_loss_list, f)
 
 # # save trained delta
-save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff.pt"),layers=args.layers)
+# save_diff(finetuned_compressed_model, os.path.join(args.save_dir, "diff.pt"),layers=args.layers)
 
 del base_model, finetuned_model, finetuned_compressed_model
 torch.cuda.empty_cache()
 
 if args.save_full_model:
-    # print("saving uncalibrated model")
-    # save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), os.path.join(args.save_dir, f"uncalibrated_test"), device="cpu",layers=args.layers)
+    print("saving uncalibrated model")
+    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff_untrained.pt"), os.path.join(args.save_dir, f"uncalibrated_test"), device="cpu",layers=args.layers)
     # print("saving calibrated model")
-    save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff.pt"), os.path.join(args.save_dir, "calibrated_mixtral"), device="cpu")
+    # save_full_model(args.base_model, args.finetuned_model, os.path.join(args.save_dir, "diff.pt"), os.path.join(args.save_dir, "calibrated_mixtral"), device="cpu")

@@ -4,6 +4,7 @@ import gc
 
 from bitdelta.binary_gemm_kernel import pack, unpack, binary_bmm
 from bitdelta.utils import get_model, get_tokenizer
+import re
 
 class BinaryDiff(nn.Module):
     def __init__(self, base, finetune):
@@ -74,12 +75,22 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,layers
 
 def save_diff(finetuned_compressed_model, save_dir,layers=None):
     diff_dict = {}
-
+    
+    # import pdb; pdb.set_trace()
+    
     for name, module in finetuned_compressed_model.named_modules():
-        if isinstance(module, BinaryDiff):
-            # diff_dict[name + ".mask"] = (module.mask == 1).bool().cpu()
+        
+        try:
             diff_dict[name + ".mask"] = module.mask.cpu()
             diff_dict[name + ".coeff"] = module.coeff.cpu()
+            # import pdb; pdb.set_trace()
+        except:
+            pass
+        
+        # if isinstance(module, BinaryDiff): # 
+        #     diff_dict[name + ".mask"] = module.mask.cpu()
+        #     diff_dict[name + ".coeff"] = module.coeff.cpu()
+            
 
     for name, param in finetuned_compressed_model.named_parameters():
         if param.requires_grad:
@@ -91,20 +102,22 @@ def save_diff(finetuned_compressed_model, save_dir,layers=None):
 def load_diff(model, diff_dir):
     device = model.device
     diff_dict = torch.load(diff_dir)
-
+    
     for name, module in model.named_modules():
+        # import pdb; pdb.set_trace()
         if name + ".mask" in diff_dict:
+            
             coeff = diff_dict[name + ".coeff"].to(device)
             mask = diff_dict[name + ".mask"].to(device)
 
-            # setattr(module, "mask", mask)
-            # setattr(module, "coeff", coeff)
             weight = (unpack(mask)*2-1) * coeff
-            
             # if "mlp" in name:
             #     weight = decomposition(weight, 1024)
+            base_name = re.sub(r'(experts\.\d+)', r'experts.0', name)
 
-            module.weight.add_(weight.T.to(module.weight.dtype))
+            module.weight.copy_(model.state_dict()[base_name + '.weight'] + weight.T.to(module.weight.dtype))
+            # module.weight.copy_(weight.T.to(module.weight.dtype))
+            
         elif name + ".weight" in diff_dict:
             module.weight = nn.Parameter(diff_dict[name + ".weight"].to(device).to(module.weight.dtype))
 

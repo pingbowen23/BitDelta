@@ -12,7 +12,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python \
     --batch_size 1 \
     --num_steps 100 \
     --save_full_model True \
-    --train \
-
+    # >> test.log
     # --layers "layers.5."\
     # /data/public/opensource_models/WizardLM/WizardMath-7B-V1.0/

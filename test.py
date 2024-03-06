@@ -5,10 +5,10 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from accelerate import infer_auto_device_map, init_empty_weights
 import torch.nn as nn
 import os
-from llava.model.language_model.llava_llama import LlavaConfig
+# from llava.model.language_model.llava_llama import LlavaConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from llava.model import *
-
+# from llava.model import *
+import re
 def get_tokenizer(tokenizer_name):
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         tokenizer_name, use_fast=False, 
@@ -88,18 +88,19 @@ def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, d
 
     del base_model
 
-model_path = "/home/pingbowen/models/Llava-v1-vicuna/Llava-v1/"
+# model_path = "/home/pingbowen/models/Llava-v1-vicuna/Llava-v1/"
 
-lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
-tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
-print('Loading LLaVA from base model...')
-model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
-if model.lm_head.weight.shape[0] != token_num:
-    model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
-    model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
-
-
+# lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
+# tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
+# print('Loading LLaVA from base model...')
+# model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+# token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
+# if model.lm_head.weight.shape[0] != token_num:
+#     model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+#     model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+name = "model.layers.30.block_sparse_moe.experts.1.w3.weight"
+new_name = re.sub(r'(experts\.\d+)', r'experts.0', name)
+print(new_name)
 
 # base_model = get_model("/home/pingbowen/models/Llava-v1-vicuna/Llava-v1/", "cuda")
 # params = base_model.state_dict()
