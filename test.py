@@ -134,13 +134,28 @@ def copy_nonzero_values(A, B):
     return A
 
 
-# 示例
-n = 4
-A = torch.randn(n, n)  # 随机生成一个n × n的张量A
-B = torch.zeros(n, n)  # 创建一个n × n的全零张量B
-A = A.flatten()
-values , top_indices = torch.topk(A, 1, largest=True)
+# # 示例
+# data = torch.rand(10, 10)
 
+# W = nn.Linear(10, 10,bias=False)
+# w = W.weight.clone()
+
+# 创建一个有1024个元素的tensor，开启梯度
+A = torch.randn(1024, requires_grad=True)
+
+# 创建不需要梯度的Tensor，包含A的前64个元素
+first_part = A[:64].clone().detach()  # 分离并克隆前64个元素
+
+# 保留需要梯度的部分
+second_part = A[64:]
+
+# 合并两部分
+A_new = torch.cat([first_part, second_part], dim=0)  # 合并成一个新的Tensor
+
+# 确认梯度情况
+print(A_new.requires_grad)  # True
+print(A_new[:64].requires_grad)  # False，前64个元素不需要梯度
+print(A_new[64:].requires_grad)  # True，剩余元素需要梯度
 
 import pdb; pdb.set_trace() 
 # params = base_model.state_dict()

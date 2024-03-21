@@ -40,13 +40,28 @@ class BinaryDiff(nn.Module):
         # TODO: This can be faster
         repeated_mask = self.mask.unsqueeze(0).repeat(x.size(0), 1, 1)
         return x @ self.base + self.coeff * binary_bmm(x, repeated_mask)
+ 
+class Delta(nn.Module):
+    def __init__(self, base,U,S,V):
+        super().__init__()
+        S.requires_grad_ = True
+        
+        self.register_buffer("base", base)
+        self.register_buffer("U", U)
+        self.register_buffer("V", V)
+        self.register_parameter(
+            "S",
+            nn.Parameter(S),
+        )
+        # del base, finetune, diff
 
-def Pass(layers=None,name=None):
-    if layers is not None:
-        for layer in layers:
-            if layer in name:
-                return True
-    return False
+    def forward(self, x):
+        # print(x.shape, self.base.shape, self.coeff.shape, self.mask.shape)
+        # [B, seq, in] @ [in, out] + [B, seq, in] @ [B, in/32, out]
+
+        # TODO: This can be faster
+        # import pdb; pdb.set_trace()
+        return x @ (self.base + self.U @ torch.diag(self.S) @ self.V.T).T.to(x.dtype)
 
 
 def solve_orthogonal(p, f):
@@ -103,18 +118,27 @@ def copy_nonzero_values(A, B):
     return A
 
 def compress_diff(base_model, finetuned_model, finetuned_compressed_model,save_dir,layers=None):
-    def compress_submodule(name, subname, module, submodule):
+    def compress_submodule(name, subname, module, submodule,U,S,V,outlier_U,outlier_V):
         target_device = submodule.weight.device
-                    
-        base_weight = base_model.get_submodule(f"{name}.{subname}").weight.detach().to(target_device)
-        finetuned_weight = finetuned_model.get_submodule(f"{name}.{subname}").weight.detach().to(target_device)
 
         compressed = BinaryDiff(
-            base=base_weight,
-            finetune=finetuned_weight,
+            U,S,V,outlier_U,outlier_V
         ).to(target_device)
 
         del submodule, base_weight
+        setattr(module, subname, None)
+        gc.collect()
+        torch.cuda.empty_cache()
+        setattr(module, subname, compressed)
+
+    def compress_delta(name, subname, module, submodule,p,U,S,V):
+        target_device = submodule.weight.device
+
+        compressed = Delta(
+            p,U,S,V
+        ).to(target_device)
+
+        del submodule
         setattr(module, subname, None)
         gc.collect()
         torch.cuda.empty_cache()
@@ -139,6 +163,8 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,save_d
                             dim , fp16_col = 1024 , 128
                             # delta , scaled_p = solve_orthogonal(p, f)
                             U,S,V,outlier_U,outlier_V = decomposition(delta,dim=dim,name=name)
+                                             
+                        # compress_submodule(name, subname, module, submodule,U,S,V,outlier_U,outlier_V)
                                                 
                         compressed_U, compressed_V = BinaryDiff(weight=U[:,fp16_col:]).to(f.device), BinaryDiff(weight=V[:,fp16_col:]).to(f.device)
                         U_mask, U_coeff, V_mask, V_coeff = compressed_U.mask, compressed_U.coeff, compressed_V.mask, compressed_V.coeff
@@ -150,37 +176,38 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,save_d
                             copy_nonzero_values(U[:,fp16_col:], outlier_U) , copy_nonzero_values(V[:,fp16_col:], outlier_V) 
                             # import pdb; pdb.set_trace() 
                         
-                        delta = U @ torch.diag(S) @ V.t() 
-                        finetuned_model.get_submodule(f"{name}.{subname}").weight.copy_(p.to(p.dtype) + delta.to(p.dtype))
+                        # compress_delta(name, subname, module, submodule,p,U,S,V)   
+                        # delta = U @ torch.diag(S) @ V.t() 
+                        # finetuned_model.get_submodule(f"{name}.{subname}").weight.copy_(p.to(p.dtype) + delta.to(p.dtype))
                 
-                '''
-                fp 16 + 1bit
+            '''
+            fp 16 + 1bit
+            
+            if "proj" in subname:
+                base_weight = base_model.get_submodule(f"{name}.{subname}").weight.detach().to(submodule.weight.device)
+                finetuned_weight = finetuned_model.get_submodule(f"{name}.{subname}").weight.detach().to(submodule.weight.device)
+                dim , thresh = 1024,0.7
                 
-                if "proj" in subname:
-                    base_weight = base_model.get_submodule(f"{name}.{subname}").weight.detach().to(submodule.weight.device)
-                    finetuned_weight = finetuned_model.get_submodule(f"{name}.{subname}").weight.detach().to(submodule.weight.device)
-                    dim , thresh = 1024,0.7
-                    
-                    if "mlp" in name:
-                        dim , thresh = 2048 , 0.24
-                    
-                    U,S,V = decomposition(finetuned_weight - base_weight,dim=dim)
-                    energy_total = torch.sum(S**2)
-                    energy_top_percent = torch.sum(S[:50]**2)
-                    ratio = energy_top_percent / energy_total
-                    
-                    compressed_U, compressed_V = BinaryDiff(weight=U[:,64:]).to(finetuned_weight.device), BinaryDiff(weight=V[:,64:]).to(finetuned_weight.device)
-                    U_mask, U_coeff, V_mask, V_coeff = compressed_U.mask, compressed_U.coeff, compressed_V.mask, compressed_V.coeff
-                    weight_U , weight_V = (unpack(U_mask)*2-1) * U_coeff, (unpack(V_mask)*2-1) * V_coeff
-                    # import pdb; pdb.set_trace()
-                    U[:,64:] , V[:,64:] = weight_U.T, weight_V.T   # 不确定是否有bug
-                    delta = U @ torch.diag(S) @ V.t()
-                    with torch.no_grad():
-                        finetuned_model.get_submodule(f"{name}.{subname}").weight.copy_(base_weight + delta.to(base_weight.dtype)) 
-                '''
+                if "mlp" in name:
+                    dim , thresh = 2048 , 0.24
+                
+                U,S,V = decomposition(finetuned_weight - base_weight,dim=dim)
+                energy_total = torch.sum(S**2)
+                energy_top_percent = torch.sum(S[:50]**2)
+                ratio = energy_top_percent / energy_total
+                
+                compressed_U, compressed_V = BinaryDiff(weight=U[:,64:]).to(finetuned_weight.device), BinaryDiff(weight=V[:,64:]).to(finetuned_weight.device)
+                U_mask, U_coeff, V_mask, V_coeff = compressed_U.mask, compressed_U.coeff, compressed_V.mask, compressed_V.coeff
+                weight_U , weight_V = (unpack(U_mask)*2-1) * U_coeff, (unpack(V_mask)*2-1) * V_coeff
+                # import pdb; pdb.set_trace()
+                U[:,64:] , V[:,64:] = weight_U.T, weight_V.T   # 不确定是否有bug
+                delta = U @ torch.diag(S) @ V.t()
+                with torch.no_grad():
+                    finetuned_model.get_submodule(f"{name}.{subname}").weight.copy_(base_weight + delta.to(base_weight.dtype)) 
+            '''
     # import pdb ; pdb.set_trace()
-    finetuned_model.to(torch.bfloat16)
-    finetuned_model.save_pretrained(save_dir)
+    # finetuned_compressed_model.to(torch.bfloat16)
+    # finetuned_compressed_model.save_pretrained(save_dir)
 
 def save_diff(finetuned_compressed_model, save_dir,layers=None,ori_diff=None):
     diff_dict = {}
