@@ -60,8 +60,9 @@ class Delta(nn.Module):
         # [B, seq, in] @ [in, out] + [B, seq, in] @ [B, in/32, out]
 
         # TODO: This can be faster
-        # import pdb; pdb.set_trace()
-        return x @ (self.base + self.U @ torch.diag(self.S) @ self.V.T).T.to(x.dtype)
+        w = (self.base + self.U @ torch.diag(self.S) @ self.V.T).to(x.dtype)
+        # finetuned_compressed_model.get_submodule("model.layers.0.self_attn.q_proj").base + finetuned_compressed_model.get_submodule("model.layers.0.self_attn.q_proj").U @ torch.diag(finetuned_compressed_model.get_submodule("model.layers.0.self_attn.q_proj").S) @ finetuned_compressed_model.get_submodule("model.layers.0.self_attn.q_proj").V.T
+        return x @ w.T
 
 
 def solve_orthogonal(p, f):
@@ -174,10 +175,14 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,save_d
                         
                         if outlier_U is not None and outlier_V is not None:
                             copy_nonzero_values(U[:,fp16_col:], outlier_U) , copy_nonzero_values(V[:,fp16_col:], outlier_V) 
-                            # import pdb; pdb.set_trace() 
+                            # import pdb; pdb.set_trace()  
                         
-                        # compress_delta(name, subname, module, submodule,p,U,S,V)   
-                        # delta = U @ torch.diag(S) @ V.t() 
+                        delta = U @ torch.diag(S) @ V.t() 
+                        
+                        compress_delta(name, subname, module, submodule,p,U,S,V)
+                        
+                        import pdb; pdb.set_trace()
+                        # 
                         # finetuned_model.get_submodule(f"{name}.{subname}").weight.copy_(p.to(p.dtype) + delta.to(p.dtype))
                 
             '''

@@ -1,4 +1,4 @@
-MODEL_SAVE_DIR=save/calibrated_model_test
+MODEL_SAVE_DIR=save/test
 
 mkdir -p $MODEL_SAVE_DIR
 

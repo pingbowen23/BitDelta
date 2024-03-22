@@ -10,6 +10,7 @@ import torch.nn.functional as F
 # from llava.model.language_model.llava_llama import LlavaConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
 # from llava.model import *
+from vllm import LLM, SamplingParams
 
 def get_tokenizer(tokenizer_name):
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -140,22 +141,11 @@ def copy_nonzero_values(A, B):
 # W = nn.Linear(10, 10,bias=False)
 # w = W.weight.clone()
 
-# 创建一个有1024个元素的tensor，开启梯度
-A = torch.randn(1024, requires_grad=True)
-
-# 创建不需要梯度的Tensor，包含A的前64个元素
-first_part = A[:64].clone().detach()  # 分离并克隆前64个元素
-
-# 保留需要梯度的部分
-second_part = A[64:]
-
-# 合并两部分
-A_new = torch.cat([first_part, second_part], dim=0)  # 合并成一个新的Tensor
-
-# 确认梯度情况
-print(A_new.requires_grad)  # True
-print(A_new[:64].requires_grad)  # False，前64个元素不需要梯度
-print(A_new[64:].requires_grad)  # True，剩余元素需要梯度
+model = LLM(
+    model="/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_model",
+    trust_remote_code=True,
+    tensor_parallel_size=1,
+    )
 
 import pdb; pdb.set_trace() 
 # params = base_model.state_dict()

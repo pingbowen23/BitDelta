@@ -39,13 +39,37 @@ with torch.no_grad():
 
 finetuned_compressed_model = AutoModelForCausalLM.from_pretrained(            
                                 args.finetuned_model,
-                                torch_dtype=torch.bfloat16,
+                                # torch_dtype=torch.bfloat16,
                                 low_cpu_mem_usage=True,
-                                device_map="auto")
+                                ).to("cuda:1")
 
 print(f"compressing diff...")
 compress_diff(base_model, finetuned_model, finetuned_compressed_model,args.save_dir)
 
+# model = AutoModelForCausalLM.from_pretrained("/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_model").to("cuda:1").to(torch.bfloat16)
+
+import pdb; pdb.set_trace()
+
+def merge(finetuned_compressed_model, finetuned_model,save_dir):
+    diff_dict = {}
+
+    for name, module in finetuned_compressed_model.named_modules():
+        if isinstance(module, Delta):
+            diff_dict[name + ".weight"] = module.base + module.U @ torch.diag(module.S) @ module.V.T  # self.U @ torch.diag(self.S) @ self.V.T
+            # import pdb; pdb.set_trace()
+
+    finetuned_model.load_state_dict(diff_dict, strict=False)
+    # import pdb; pdb.set_trace()
+    finetuned_model.to(torch.bfloat16)
+    
+    finetuned_model.save_pretrained(save_dir)
+    tokenizer.save_pretrained(save_dir)
+
+
+merge(finetuned_compressed_model, finetuned_model,args.save_dir)
+
+
+'''
 if args.train:
     
     train_num_samples = args.batch_size * args.num_steps
@@ -95,24 +119,7 @@ if args.train:
         scheduler.step()
 
         bar.set_description(f"train loss: {loss.item()}")
-
-def merge(finetuned_compressed_model, finetuned_model,save_dir):
-    diff_dict = {}
-
-    for name, module in finetuned_compressed_model.named_modules():
-        if isinstance(module, Delta):
-            diff_dict[name + ".weight"] = module.base + module.U @ torch.diag(module.S) @ module.V.T  # self.U @ torch.diag(self.S) @ self.V.T
-            # import pdb; pdb.set_trace()
-
-    finetuned_model.load_state_dict(diff_dict, strict=False)
-    # import pdb; pdb.set_trace()
-    finetuned_model.to(torch.bfloat16)
-    
-    finetuned_model.save_pretrained(save_dir)
-    tokenizer.save_pretrained(save_dir)
-
-
-merge(finetuned_compressed_model, finetuned_model,args.save_dir)
+'''
 
 # 打开文件
 # file_path = '/home/pingbowen/workspace/lora-fusion/UltraEval/datasets/gsm8k/data/gsm8k.jsonl'
