@@ -180,9 +180,6 @@ def compress_diff(base_model, finetuned_model, finetuned_compressed_model,save_d
                         delta = U @ torch.diag(S) @ V.t() 
                         
                         compress_delta(name, subname, module, submodule,p,U,S,V)
-                        
-                        import pdb; pdb.set_trace()
-                        # 
                         # finetuned_model.get_submodule(f"{name}.{subname}").weight.copy_(p.to(p.dtype) + delta.to(p.dtype))
                 
             '''

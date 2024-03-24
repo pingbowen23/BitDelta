@@ -22,15 +22,15 @@ tokenizer = get_tokenizer(args.finetuned_model)
 with torch.no_grad():
     base_model = AutoModelForCausalLM.from_pretrained(
             args.base_model,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-        ).to("cuda:0")
+        ).to("cuda:0").to(torch.float32)
     
     finetuned_model = AutoModelForCausalLM.from_pretrained(
             args.finetuned_model,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-        ).to("cuda:0")
+        ).to("cuda:0").to(torch.float32)
     
     # base_model = get_model(args.base_model, args.base_model_device, args.base_model_memory_map).to(torch.float32)
     # finetuned_model = get_model(args.finetuned_model, args.finetuned_model_device, args.finetuned_model_memory_map).to(torch.float32)
@@ -39,16 +39,13 @@ with torch.no_grad():
 
 finetuned_compressed_model = AutoModelForCausalLM.from_pretrained(            
                                 args.finetuned_model,
-                                # torch_dtype=torch.bfloat16,
+                                torch_dtype=torch.bfloat16,
                                 low_cpu_mem_usage=True,
-                                ).to("cuda:1")
+                                device_map="auto"
+                                )
 
 print(f"compressing diff...")
 compress_diff(base_model, finetuned_model, finetuned_compressed_model,args.save_dir)
-
-# model = AutoModelForCausalLM.from_pretrained("/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_model").to("cuda:1").to(torch.bfloat16)
-
-import pdb; pdb.set_trace()
 
 def merge(finetuned_compressed_model, finetuned_model,save_dir):
     diff_dict = {}
