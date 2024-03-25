@@ -26,6 +26,6 @@ with torch.no_grad():
 finetuned_compressed_model = get_model(args.finetuned_model, args.finetuned_compressed_model_device, args.finetuned_compressed_model_memory_map)
 
 print(f"compressing diff...")
-compress_diff(base_model, finetuned_model, finetuned_compressed_model,args.save_dir)
+compress_diff(base_model, finetuned_model, finetuned_compressed_model,args.save_dir,args)
 
 tokenizer.save_pretrained(args.save_dir)

@@ -26,6 +26,8 @@ def parse_args():
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--train", action="store_true")
+    parser.add_argument("--rank_dim", type=int, default=0)
+    parser.add_argument("--bit_dim", type=int, default=0)
 
     # device management
     parser.add_argument("--base_model_device", type=str, default="0")

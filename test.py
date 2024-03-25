@@ -1,10 +1,12 @@
 import argparse
 import transformers
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from accelerate import infer_auto_device_map, init_empty_weights
 import torch.nn as nn
-import os
 # from llava.model.language_model.llava_llama import LlavaConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
 # from llava.model import *
@@ -89,12 +91,31 @@ def save_full_model(base_model_name, finetuned_model_name, diff_dir, save_dir, d
     del base_model
 
 
-A = torch.Tensor([[1, 2, 3],[6,5,4]])
-B = torch.Tensor([[9],[9]])
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-A[:,-1:] = B
+model_id = "/data/public/opensource_models/WizardLM/WizardMath-7B-V1.0/"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-print(A)
+model = AutoModelForCausalLM.from_pretrained(model_id,torch_dtype=torch.bfloat16).to(device)
+
+attn_model = AutoModelForCausalLM.from_pretrained(
+            "/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_attn",
+            # torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        ).to(device)
+
+mlp_model = AutoModelForCausalLM.from_pretrained(
+            "/home/pingbowen/workspace/delta-compression/BitDelta/save/uncalibrated_mlp",
+            # torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        ).to(device)
+
+import pdb; pdb.set_trace()
+
+
+
 # U,S,V = torch.svd(A)
 # # print("-----------------")
 
